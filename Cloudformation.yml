@@ -19,6 +19,30 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "tf-artifacts-${AWS::AccountId}-${AWS::Region}"
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codebuild-terraform-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - s3:*
+                  - secretsmanager:GetSecretValue
+                  - sts:AssumeRole
+                Resource: "*"
+
 
   CodePipelineRole:
     Type: AWS::IAM::Role
@@ -42,7 +66,7 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: "*"
 
-  TerraformBuildProject:
+  TerraformBuildProjectplan:
     Type: AWS::CodeBuild::Project
     Properties:
       Name: TerraformPlanProject
@@ -55,9 +79,26 @@ Resources:
         EnvironmentVariables:
           - Name: TF_ACTION
             Value: plan
-      ServiceRole: !GetAtt CodePipelineRole.Arn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
       Artifacts:
         Type: CODEPIPELINE
+        
+  TerraformBuildProjectapply:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: TerraformapplyProject
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        EnvironmentVariables:
+          - Name: TF_ACTION
+            Value: apply
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE        
 
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
@@ -81,7 +122,7 @@ Resources:
                 Owner: !Ref GitHubOwner
                 Repo: !Ref GitHubRepo
                 Branch: !Ref GitHubBranch
-                OAuthToken: !Sub "{{resolve:secretsmanager:${GitHubTokenSecretId}:SecretString:token}}"
+                OAuthToken: !Sub "{{resolve:secretsmanager:${GitHubTokenSecretId}:SecretString}}"
               RunOrder: 1
 
         - Name: Build
@@ -97,7 +138,7 @@ Resources:
               OutputArtifacts:
                 - Name: BuildOutput
               Configuration:
-                ProjectName: !Ref TerraformBuildProject
+                ProjectName: !Ref TerraformBuildProjectplan
               RunOrder: 1
 
         - Name: Approval
@@ -121,8 +162,5 @@ Resources:
               InputArtifacts:
                 - Name: BuildOutput
               Configuration:
-                ProjectName: !Ref TerraformBuildProject
-                EnvironmentVariablesOverride:
-                  - Name: TF_ACTION
-                    Value: apply
+                ProjectName: !Ref TerraformBuildProjectapply
               RunOrder: 1
