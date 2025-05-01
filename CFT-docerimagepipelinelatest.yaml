@@ -1,52 +1,33 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CodePipeline for Terraform with manual approval
+Description: CodePipeline to build Docker image from GitHub and push to ECR
 
 Parameters:
-  GitHubRepo:
-    Type: String
   GitHubOwner:
     Type: String
+    Description: GitHub user/org name
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
   GitHubBranch:
     Type: String
     Default: main
   GitHubTokenSecretId:
     Type: String
-    Description: Secret ID in Secrets Manager holding GitHub token
+    Description: ARN of CodeStar GitHub connection
+  EcrRepositoryUri:
+    Type: String
+    Description: Full ECR URI (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app)
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+  ArtifactBucket:
+    Type: String
 
 Resources:
-
-  ArtifactBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "tf-artifacts-${AWS::AccountId}-${AWS::Region}"
-  CodeBuildRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: codebuild-terraform-role
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codebuild.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: CodeBuildPolicy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:*
-                  - s3:*
-                  - secretsmanager:GetSecretValue
-                  - sts:AssumeRole
-                Resource: "*"
-
-
   CodePipelineRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: CodePipelineOnlyECRRolelatest
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -54,8 +35,10 @@ Resources:
             Principal:
               Service: codepipeline.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
       Policies:
-        - PolicyName: CodePipelinePolicy
+        - PolicyName: CodePipelinePolicylatest
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -66,41 +49,60 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: "*"
 
-  TerraformBuildProjectplan:
-    Type: AWS::CodeBuild::Project
+  CodeBuildRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: TerraformPlanProject
-      Source:
-        Type: CODEPIPELINE
-      Environment:
-        Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:7.0
-        EnvironmentVariables:
-          - Name: TF_ACTION
-            Value: plan
-      ServiceRole: !GetAtt CodeBuildRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-        
-  TerraformBuildProjectapply:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: TerraformapplyProject
-      Source:
-        Type: CODEPIPELINE
-      Environment:
-        Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:7.0
-        EnvironmentVariables:
-          - Name: TF_ACTION
-            Value: apply
-      ServiceRole: !GetAtt CodeBuildRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE        
+      RoleName: CodeBuildOnlyECRRolelatest
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildECRPushPolicylatest
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - s3:*
+                Resource: "*"
 
-  Pipeline:
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: BuildDockerPushToECRlatest
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AwsRegion
+          - Name: AWS_ACCOUNT_ID
+            Value: !Sub ${AWS::AccountId}
+          - Name: ECR_REPOSITORY
+            Value: !Ref EcrRepositoryUri
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+
+  CodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
       RoleArn: !GetAtt CodePipelineRole.Arn
@@ -117,7 +119,7 @@ Resources:
                 Provider: GitHub
                 Version: 1
               OutputArtifacts:
-                - Name: SourceOutput
+                - Name: gitoutputlatest
               Configuration:
                 Owner: !Ref GitHubOwner
                 Repo: !Ref GitHubRepo
@@ -127,42 +129,20 @@ Resources:
 
         - Name: Build
           Actions:
-            - Name: TerraformPlan
+            - Name: DockerBuildAndPush
               ActionTypeId:
                 Category: Build
                 Owner: AWS
                 Provider: CodeBuild
                 Version: 1
               InputArtifacts:
-                - Name: SourceOutput
+                - Name: gitoutputlatest
               OutputArtifacts:
-                - Name: BuildOutput
+                - Name: finaloutput
               Configuration:
-                ProjectName: !Ref TerraformBuildProjectplan
-              RunOrder: 1
+                ProjectName: !Ref CodeBuildProject
 
-        - Name: Approval
-          Actions:
-            - Name: ManualApproval
-              ActionTypeId:
-                Category: Approval
-                Owner: AWS
-                Provider: Manual
-                Version: 1
-              RunOrder: 1
-
-        - Name: Deploy
-          Actions:
-            - Name: TerraformApply
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: 1
-              InputArtifacts:
-                - Name: BuildOutput
-              OutputArtifacts:
-                - Name: deployoutput
-              Configuration:
-                ProjectName: !Ref TerraformBuildProjectapply
-              RunOrder: 1
+Outputs:
+  PipelineName:
+    Value: !Ref CodePipeline
+    Description: CodePipeline name
